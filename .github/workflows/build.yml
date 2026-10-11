@@ -39,7 +39,7 @@ jobs:
           w.write_text(s)
           print("patched gradle-wrapper.properties")
 
-          # 2. libs.versions.toml: 版本降级
+          # 2. libs.versions.toml
           l = pathlib.Path("gradle/libs.versions.toml")
           s = l.read_text()
           for key, val in {
@@ -55,7 +55,7 @@ jobs:
           l.write_text(s)
           print("patched libs.versions.toml")
 
-          # 3. 所有 build.gradle.kts: 新语法 → 旧语法 + 删除新块
+          # 3. 所有 build.gradle.kts: 语法降级
           targets = [
               "common/build.gradle.kts",
               "mobile/build.gradle.kts",
@@ -68,15 +68,10 @@ jobs:
                   print(f"skip {p}")
                   continue
               s = f.read_text()
-              # compileSdk 新语法 → 旧语法
               s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 33', s)
-              # targetSdk 降级
               s = re.sub(r'targetSdk\s*=\s*\d+', 'targetSdk = 33', s)
-              # 删除 optimization { ... } 块
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
-              # 删除 L8DexDesugarLibTask import
               s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\n', '', s, flags=re.M)
-              # 删除整个 afterEvaluate { ... } 块（专门处理 L8DexDesugarLibTask 那段）
               s = re.sub(
                   r'afterEvaluate\s*\{.*?L8DexDesugarLibTask.*?\n\}\n',
                   '',
@@ -86,7 +81,7 @@ jobs:
               f.write_text(s)
               print(f"patched {p}")
 
-          # 4. shared: Groovy 语法
+          # 4. shared Groovy 语法
           sh = pathlib.Path("shared/build.gradle.kts")
           if sh.exists():
               s = sh.read_text()
@@ -95,7 +90,7 @@ jobs:
               sh.write_text(s)
               print("patched shared/build.gradle.kts")
 
-          # 5. settings.gradle.kts: 删除 foojay-resolver 插件
+          # 5. settings.gradle.kts: 删除 foojay 插件
           st = pathlib.Path("settings.gradle.kts")
           s = st.read_text()
           s = re.sub(
@@ -106,15 +101,23 @@ jobs:
           st.write_text(s)
           print("patched settings.gradle.kts")
 
-          # 6. mobile manifest: 删除 API 24+/31+/33+ 字段
-          m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
-          if m.exists():
-              s = m.read_text()
+          # 6. manifest: 删除 API 24+/31+/33+ 字段
+          m2 = pathlib.Path("mobile/src/main/AndroidManifest.xml")
+          if m2.exists():
+              s = m2.read_text()
               s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
               s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
               s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
-              m.write_text(s)
+              m2.write_text(s)
               print("patched AndroidManifest.xml")
+
+          # 7. mobile: assets.directories → assets.srcDirs (AGP 7.4 旧 API)
+          m3 = pathlib.Path("mobile/build.gradle.kts")
+          if m3.exists():
+              s = m3.read_text()
+              s = s.replace("source.assets.directories", "source.assets.srcDirs")
+              m3.write_text(s)
+              print("patched mobile assets API")
           PYEOF
 
       - name: Verify patches
@@ -132,6 +135,8 @@ jobs:
           done
           echo "===== mobile manifest 残留检查 ====="
           grep -n "dataExtractionRules\|localeConfig\|resizeableActivity" mobile/src/main/AndroidManifest.xml || echo "已全部删除"
+          echo "===== mobile assets API 检查 ====="
+          grep -n "assets.directories\|assets.srcDirs" mobile/build.gradle.kts || true
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
