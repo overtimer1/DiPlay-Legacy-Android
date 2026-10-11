@@ -31,7 +31,7 @@ jobs:
           python3 - <<'PYEOF'
           import re, pathlib, glob
 
-          # 1. Gradle wrapper
+          # 1. Gradle wrapper: 9.5 -> 7.6.4
           w = pathlib.Path("gradle/wrapper/gradle-wrapper.properties")
           s = w.read_text()
           s = re.sub(r'gradle-[\d.]+-bin\.zip', 'gradle-7.6.4-bin.zip', s)
@@ -55,48 +55,30 @@ jobs:
           l.write_text(s)
           print("patched libs.versions.toml")
 
-          # 3. 全局扫描所有 build.gradle / build.gradle.kts
+          # 3. 全局扫描所有 build.gradle*
           for p in glob.glob("**/build.gradle*", recursive=True):
-              # 跳过 .gradle 缓存目录
               if "/build/" in p or "/.gradle/" in p or p.startswith("build/"):
                   continue
               f = pathlib.Path(p)
               s = f.read_text()
               original = s
-
-              # compileSdk 新语法（Kotlin DSL）→ 旧语法
               s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 33', s)
-
-              # compileSdk = 数字（Groovy/Kotlin 通用）
               s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 33', s)
-
-              # targetSdk = 数字
               s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 33', s)
-
-              # minSdk 保持 19，不要动
-
-              # 删 optimization 块（新版语法）
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
-
-              # 删 L8DexDesugarLibTask import
               s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
-
-              # 删 afterEvaluate { ... L8DexDesugarLibTask ... }
               s = re.sub(
                   r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n',
                   '',
                   s,
                   flags=re.S
               )
-
-              # assets.directories → assets.srcDirs
               s = s.replace("source.assets.directories", "source.assets.srcDirs")
-
               if s != original:
                   f.write_text(s)
                   print(f"patched {p}")
 
-          # 4. settings.gradle.kts
+          # 4. settings.gradle.kts: 删除 foojay 插件
           st = pathlib.Path("settings.gradle.kts")
           s = st.read_text()
           s = re.sub(
@@ -107,7 +89,7 @@ jobs:
           st.write_text(s)
           print("patched settings.gradle.kts")
 
-          # 5. manifest
+          # 5. manifest: 删除 API 24+/31+/33+ 字段
           m2 = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           if m2.exists():
               s = m2.read_text()
@@ -116,6 +98,16 @@ jobs:
               s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
               m2.write_text(s)
               print("patched AndroidManifest.xml")
+
+          # 6. gradle.properties: 开启 AndroidX
+          gp = pathlib.Path("gradle.properties")
+          s = gp.read_text() if gp.exists() else ""
+          if "android.useAndroidX" not in s:
+              s += "\nandroid.useAndroidX=true\n"
+          if "android.enableJetifier" not in s:
+              s += "android.enableJetifier=true\n"
+          gp.write_text(s)
+          print("patched gradle.properties")
           PYEOF
 
       - name: Verify patches
@@ -135,6 +127,8 @@ jobs:
           grep -n "dataExtractionRules\|localeConfig\|resizeableActivity" mobile/src/main/AndroidManifest.xml || echo "OK"
           echo "===== mobile assets API ====="
           grep -n "assets.directories\|assets.srcDirs" mobile/build.gradle.kts || true
+          echo "===== gradle.properties AndroidX ====="
+          grep -E "android.useAndroidX|android.enableJetifier" gradle.properties || true
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
