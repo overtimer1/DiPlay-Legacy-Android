@@ -1,0 +1,146 @@
+name: Build DiPlay Legacy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Use preinstalled Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_PATH
+
+      - name: Install SDK components
+        run: |
+          SDKMGR=$(find $ANDROID_SDK_ROOT -name sdkmanager -type f 2>/dev/null | head -n 1)
+          yes | $SDKMGR --licenses > /dev/null 2>&1 || true
+          $SDKMGR "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+
+      - name: Patch project for AGP 7.4
+        run: |
+          python3 - <<'PYEOF'
+          import re, pathlib
+
+          # 1. Gradle wrapper: 9.5 → 7.6.4
+          w = pathlib.Path("gradle/wrapper/gradle-wrapper.properties")
+          s = w.read_text()
+          s = re.sub(r'gradle-[\d.]+-bin\.zip', 'gradle-7.6.4-bin.zip', s)
+          s = re.sub(r'^distributionSha256Sum=.*\n', '', s, flags=re.M)
+          w.write_text(s)
+          print("patched gradle-wrapper.properties")
+
+          # 2. libs.versions.toml: 版本降级
+          l = pathlib.Path("gradle/libs.versions.toml")
+          s = l.read_text()
+          for key, val in {
+              "agp": "7.4.2",
+              "kotlin": "1.9.24",
+              "coreKtx": "1.9.0",
+              "activity": "1.6.1",
+              "lifecycleRuntimeKtx": "2.5.1",
+              "appcompat": "1.5.1",
+              "desugarJdkLibs": "2.0.4",
+          }.items():
+              s = re.sub(rf'^{key} = ".*"', f'{key} = "{val}"', s, flags=re.M)
+          l.write_text(s)
+          print("patched libs.versions.toml")
+
+          # 3. 所有 build.gradle.kts: 新语法 → 旧语法 + 删除新块
+          targets = [
+              "common/build.gradle.kts",
+              "mobile/build.gradle.kts",
+              "samples/home/build.gradle.kts",
+              "samples/maphost/build.gradle.kts",
+          ]
+          for p in targets:
+              f = pathlib.Path(p)
+              if not f.exists():
+                  print(f"skip {p}")
+                  continue
+              s = f.read_text()
+              # compileSdk 新语法 → 旧语法
+              s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 33', s)
+              # targetSdk 降级
+              s = re.sub(r'targetSdk\s*=\s*\d+', 'targetSdk = 33', s)
+              # 删除 optimization { ... } 块
+              s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
+              # 删除 L8DexDesugarLibTask import
+              s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\n', '', s, flags=re.M)
+              # 删除整个 afterEvaluate { ... } 块（专门处理 L8DexDesugarLibTask 那段）
+              s = re.sub(
+                  r'afterEvaluate\s*\{.*?L8DexDesugarLibTask.*?\n\}\n',
+                  '',
+                  s,
+                  flags=re.S
+              )
+              f.write_text(s)
+              print(f"patched {p}")
+
+          # 4. shared: Groovy 语法
+          sh = pathlib.Path("shared/build.gradle.kts")
+          if sh.exists():
+              s = sh.read_text()
+              s = s.replace("compileSdk = 37", "compileSdk = 33")
+              s = s.replace("targetSdk = 37", "targetSdk = 33")
+              sh.write_text(s)
+              print("patched shared/build.gradle.kts")
+
+          # 5. settings.gradle.kts: 删除 foojay-resolver 插件
+          st = pathlib.Path("settings.gradle.kts")
+          s = st.read_text()
+          s = re.sub(
+              r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*',
+              '',
+              s
+          )
+          st.write_text(s)
+          print("patched settings.gradle.kts")
+
+          # 6. mobile manifest: 删除 API 24+/31+/33+ 字段
+          m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
+          if m.exists():
+              s = m.read_text()
+              s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
+              s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
+              s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
+              m.write_text(s)
+              print("patched AndroidManifest.xml")
+          PYEOF
+
+      - name: Verify patches
+        run: |
+          echo "===== gradle-wrapper ====="
+          grep distributionUrl gradle/wrapper/gradle-wrapper.properties
+          echo "===== libs.versions ====="
+          grep -E "^(agp|kotlin|coreKtx|activity|lifecycleRuntimeKtx|appcompat|desugarJdkLibs) " gradle/libs.versions.toml
+          echo "===== compileSdk / targetSdk ====="
+          for f in common/build.gradle.kts mobile/build.gradle.kts shared/build.gradle.kts samples/home/build.gradle.kts samples/maphost/build.gradle.kts; do
+            if [ -f "$f" ]; then
+              echo "--- $f ---"
+              grep -n "compileSdk\|targetSdk" "$f" || true
+            fi
+          done
+          echo "===== mobile manifest 残留检查 ====="
+          grep -n "dataExtractionRules\|localeConfig\|resizeableActivity" mobile/src/main/AndroidManifest.xml || echo "已全部删除"
+
+      - name: Grant execute permission
+        run: chmod +x ./gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew :mobile:assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiPlay-debug
+          path: mobile/build/outputs/apk/debug/*.apk
