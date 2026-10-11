@@ -1,4 +1,4 @@
-name: Build DiPlay Legacy for 4.2.2
+name: Build DiPlay Legacy
 
 on:
   workflow_dispatch:
@@ -29,9 +29,9 @@ jobs:
       - name: Patch project for AGP 7.4
         run: |
           python3 - <<'PYEOF'
-          import re, pathlib
+          import re, pathlib, glob
 
-          # 1. Gradle wrapper: 9.5 → 7.6.4
+          # 1. Gradle wrapper
           w = pathlib.Path("gradle/wrapper/gradle-wrapper.properties")
           s = w.read_text()
           s = re.sub(r'gradle-[\d.]+-bin\.zip', 'gradle-7.6.4-bin.zip', s)
@@ -55,42 +55,48 @@ jobs:
           l.write_text(s)
           print("patched libs.versions.toml")
 
-          # 3. 所有 build.gradle.kts: 语法降级
-          targets = [
-              "common/build.gradle.kts",
-              "mobile/build.gradle.kts",
-              "samples/home/build.gradle.kts",
-              "samples/maphost/build.gradle.kts",
-          ]
-          for p in targets:
-              f = pathlib.Path(p)
-              if not f.exists():
-                  print(f"skip {p}")
+          # 3. 全局扫描所有 build.gradle / build.gradle.kts
+          for p in glob.glob("**/build.gradle*", recursive=True):
+              # 跳过 .gradle 缓存目录
+              if "/build/" in p or "/.gradle/" in p or p.startswith("build/"):
                   continue
+              f = pathlib.Path(p)
               s = f.read_text()
+              original = s
+
+              # compileSdk 新语法（Kotlin DSL）→ 旧语法
               s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 33', s)
-              s = re.sub(r'targetSdk\s*=\s*\d+', 'targetSdk = 33', s)
+
+              # compileSdk = 数字（Groovy/Kotlin 通用）
+              s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 33', s)
+
+              # targetSdk = 数字
+              s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 33', s)
+
+              # minSdk 保持 19，不要动
+
+              # 删 optimization 块（新版语法）
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
-              s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\n', '', s, flags=re.M)
+
+              # 删 L8DexDesugarLibTask import
+              s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
+
+              # 删 afterEvaluate { ... L8DexDesugarLibTask ... }
               s = re.sub(
-                  r'afterEvaluate\s*\{.*?L8DexDesugarLibTask.*?\n\}\n',
+                  r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n',
                   '',
                   s,
                   flags=re.S
               )
-              f.write_text(s)
-              print(f"patched {p}")
 
-          # 4. shared Groovy 语法
-          sh = pathlib.Path("shared/build.gradle.kts")
-          if sh.exists():
-              s = sh.read_text()
-              s = s.replace("compileSdk = 37", "compileSdk = 33")
-              s = s.replace("targetSdk = 37", "targetSdk = 33")
-              sh.write_text(s)
-              print("patched shared/build.gradle.kts")
+              # assets.directories → assets.srcDirs
+              s = s.replace("source.assets.directories", "source.assets.srcDirs")
 
-          # 5. settings.gradle.kts: 删除 foojay 插件
+              if s != original:
+                  f.write_text(s)
+                  print(f"patched {p}")
+
+          # 4. settings.gradle.kts
           st = pathlib.Path("settings.gradle.kts")
           s = st.read_text()
           s = re.sub(
@@ -101,7 +107,7 @@ jobs:
           st.write_text(s)
           print("patched settings.gradle.kts")
 
-          # 6. manifest: 删除 API 24+/31+/33+ 字段
+          # 5. manifest
           m2 = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           if m2.exists():
               s = m2.read_text()
@@ -110,14 +116,6 @@ jobs:
               s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
               m2.write_text(s)
               print("patched AndroidManifest.xml")
-
-          # 7. mobile: assets.directories → assets.srcDirs (AGP 7.4 旧 API)
-          m3 = pathlib.Path("mobile/build.gradle.kts")
-          if m3.exists():
-              s = m3.read_text()
-              s = s.replace("source.assets.directories", "source.assets.srcDirs")
-              m3.write_text(s)
-              print("patched mobile assets API")
           PYEOF
 
       - name: Verify patches
@@ -126,16 +124,16 @@ jobs:
           grep distributionUrl gradle/wrapper/gradle-wrapper.properties
           echo "===== libs.versions ====="
           grep -E "^(agp|kotlin|coreKtx|activity|lifecycleRuntimeKtx|appcompat|desugarJdkLibs) " gradle/libs.versions.toml
-          echo "===== compileSdk / targetSdk ====="
-          for f in common/build.gradle.kts mobile/build.gradle.kts shared/build.gradle.kts samples/home/build.gradle.kts samples/maphost/build.gradle.kts; do
-            if [ -f "$f" ]; then
+          echo "===== 所有 build.gradle* 的 compileSdk/targetSdk ====="
+          for f in $(find . -name "build.gradle*" -not -path "*/build/*" -not -path "*/.gradle/*"); do
+            if grep -q "compileSdk\|targetSdk" "$f" 2>/dev/null; then
               echo "--- $f ---"
-              grep -n "compileSdk\|targetSdk" "$f" || true
+              grep -n "compileSdk\|targetSdk" "$f"
             fi
           done
-          echo "===== mobile manifest 残留检查 ====="
-          grep -n "dataExtractionRules\|localeConfig\|resizeableActivity" mobile/src/main/AndroidManifest.xml || echo "已全部删除"
-          echo "===== mobile assets API 检查 ====="
+          echo "===== mobile manifest 残留 ====="
+          grep -n "dataExtractionRules\|localeConfig\|resizeableActivity" mobile/src/main/AndroidManifest.xml || echo "OK"
+          echo "===== mobile assets API ====="
           grep -n "assets.directories\|assets.srcDirs" mobile/build.gradle.kts || true
 
       - name: Grant execute permission
