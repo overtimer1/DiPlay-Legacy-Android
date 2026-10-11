@@ -99,15 +99,15 @@ jobs:
               m2.write_text(s)
               print("patched AndroidManifest.xml")
 
-          # 6. gradle.properties: 开启 AndroidX
+          # 6. gradle.properties: 只开 useAndroidX，不开 Jetifier
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
+          # 删掉可能已有的 enableJetifier 行
+          s = re.sub(r'^android\.enableJetifier=.*\n', '', s, flags=re.M)
           if "android.useAndroidX" not in s:
               s += "\nandroid.useAndroidX=true\n"
-          if "android.enableJetifier" not in s:
-              s += "android.enableJetifier=true\n"
           gp.write_text(s)
-          print("patched gradle.properties")
+          print("patched gradle.properties (useAndroidX only, no Jetifier)")
           PYEOF
 
       - name: Verify patches
@@ -125,9 +125,7 @@ jobs:
           done
           echo "===== mobile manifest 残留 ====="
           grep -n "dataExtractionRules\|localeConfig\|resizeableActivity" mobile/src/main/AndroidManifest.xml || echo "OK"
-          echo "===== mobile assets API ====="
-          grep -n "assets.directories\|assets.srcDirs" mobile/build.gradle.kts || true
-          echo "===== gradle.properties AndroidX ====="
+          echo "===== gradle.properties ====="
           grep -E "android.useAndroidX|android.enableJetifier" gradle.properties || true
 
       - name: Grant execute permission
