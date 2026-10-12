@@ -1,4 +1,4 @@
-name: Build DiPlay Legacy
+name: Build DiPlay for Android 4.2.2
 
 on:
   workflow_dispatch:
@@ -26,18 +26,17 @@ jobs:
           yes | $SDKMGR --licenses > /dev/null 2>&1 || true
           $SDKMGR "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Patch project for AGP 7.4 + minSdk 17
+      - name: Patch for minSdk 17
         run: |
           python3 - <<'PYEOF'
           import re, pathlib, glob
 
-          # 1. Gradle wrapper: 9.5 -> 7.6.4
+          # 1. Gradle wrapper
           w = pathlib.Path("gradle/wrapper/gradle-wrapper.properties")
           s = w.read_text()
           s = re.sub(r'gradle-[\d.]+-bin\.zip', 'gradle-7.6.4-bin.zip', s)
           s = re.sub(r'^distributionSha256Sum=.*\n', '', s, flags=re.M)
           w.write_text(s)
-          print("patched gradle-wrapper.properties")
 
           # 2. libs.versions.toml
           l = pathlib.Path("gradle/libs.versions.toml")
@@ -53,67 +52,51 @@ jobs:
           }.items():
               s = re.sub(rf'^{key} = ".*"', f'{key} = "{val}"', s, flags=re.M)
           l.write_text(s)
-          print("patched libs.versions.toml")
 
-          # 3. 全局扫描：compileSdk=34, targetSdk=34, minSdk=17
+          # 3. build.gradle* 全局
           for p in glob.glob("**/build.gradle*", recursive=True):
               if "/build/" in p or "/.gradle/" in p or p.startswith("build/"):
                   continue
               f = pathlib.Path(p)
               s = f.read_text()
-              original = s
-
-              # compileSdk -> 34
+              orig = s
               s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 34', s)
               s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 34', s)
-
-              # targetSdk -> 34
               s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 34', s)
-
-              # minSdk -> 17  ★ 关键
               s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 17', s)
               s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 17', s)
-              s = re.sub(r'\bminSdkVersion\s*=\s*\d+', 'minSdkVersion = 17', s)
-
-              # 删 optimization 块
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
-
-              # 删 L8DexDesugarLibTask import 和 afterEvaluate 块
               s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
-              s = re.sub(
-                  r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n',
-                  '',
-                  s,
-                  flags=re.S
-              )
-
-              # assets.directories -> assets.srcDirs
+              s = re.sub(r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n', '', s, flags=re.S)
               s = s.replace("source.assets.directories", "source.assets.srcDirs")
-
-              if s != original:
+              if s != orig:
                   f.write_text(s)
-                  print(f"patched {p}")
 
           # 4. settings.gradle.kts
           st = pathlib.Path("settings.gradle.kts")
           s = st.read_text()
-          s = re.sub(
-              r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*',
-              '',
-              s
-          )
+          s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
-          print("patched settings.gradle.kts")
 
-          # 5. manifest
-          m2 = pathlib.Path("mobile/src/main/AndroidManifest.xml")
-          if m2.exists():
-              s = m2.read_text()
-              s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
-              s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
-              s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
-              m2.write_text(s)
-              print("patched AndroidManifest.xml")
+          # 5. manifest: 删新字段 + overrideLibrary
+          m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
+          s = m.read_text()
+          s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
+          s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
+          s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
+          if "tools:overrideLibrary" not in s:
+              override = ('<uses-sdk tools:overrideLibrary="'
+                  'androidx.media3.ui,androidx.media3.exoplayer,'
+                  'androidx.media3.exoplayer.hls,androidx.media3.common,'
+                  'androidx.media3.extractor,androidx.media3.container,'
+                  'androidx.media3.datasource,androidx.media3.decoder,'
+                  'androidx.media3.database,androidx.media,'
+                  'androidx.core,androidx.appcompat,androidx.activity,'
+                  'androidx.lifecycle.runtime,androidx.annotation,'
+                  'androidx.multidex,androidx.recyclerview,androidx.fragment'
+                  '" />')
+              s = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override, s, count=1)
+          m.write_text(s)
 
           # 6. gradle.properties
           gp = pathlib.Path("gradle.properties")
@@ -124,20 +107,16 @@ jobs:
               s += "\nandroid.useAndroidX=true\n"
           s += "android.suppressUnsupportedCompileSdk=34\n"
           gp.write_text(s)
-          print("patched gradle.properties")
+
+          print("All patches applied.")
           PYEOF
 
-      - name: Verify patches
+      - name: Show patched versions
         run: |
-          echo "===== minSdk / targetSdk / compileSdk ====="
-          for f in $(find . -name "build.gradle*" -not -path "*/build/*" -not -path "*/.gradle/*"); do
-            if grep -qE "minSdk|compileSdk|targetSdk" "$f" 2>/dev/null; then
-              echo "--- $f ---"
-              grep -nE "minSdk|compileSdk|targetSdk" "$f"
-            fi
-          done
-          echo "===== gradle.properties ====="
-          grep -E "android.useAndroidX|android.suppressUnsupportedCompileSdk" gradle.properties || true
+          echo "===== manifest ====="
+          head -30 mobile/src/main/AndroidManifest.xml
+          echo "===== build.gradle.kts minSdk ====="
+          grep -rnE "minSdk|compileSdk|targetSdk" --include="build.gradle*" . | grep -v "/build/" | grep -v "/.gradle/"
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
@@ -148,5 +127,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DiPlay-debug
+          name: DiPlay-minSdk17-debug
           path: mobile/build/outputs/apk/debug/*.apk
