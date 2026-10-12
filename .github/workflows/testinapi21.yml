@@ -63,6 +63,9 @@ jobs:
               s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
               s = re.sub(r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n', '', s, flags=re.S)
               s = s.replace("source.assets.directories", "source.assets.srcDirs")
+              # 删掉所有 multiDexKeep 相关配置
+              s = re.sub(r'\s*multiDexKeepProguard\s*=\s*file\([^)]*\)', '', s)
+              s = re.sub(r'\s*multiDexKeepFile\s*=\s*file\([^)]*\)', '', s)
               if s != orig:
                   f.write_text(s)
 
@@ -71,11 +74,17 @@ jobs:
           s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
 
+          # manifest: 删新字段 + overrideLibrary + Application 改成 MultiDexApplication
           m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           s = m.read_text()
           s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
           s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
           s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
+          # 关键：Application 换成标准 MultiDexApplication
+          s = s.replace(
+              'android:name="com.shilapi.xcertplay.DiPlayApplication"',
+              'android:name="androidx.multidex.MultiDexApplication"'
+          )
           if "tools:overrideLibrary" not in s:
               override = ('<uses-sdk tools:overrideLibrary="'
                   'androidx.media3.ui,androidx.media3.exoplayer,'
@@ -89,6 +98,7 @@ jobs:
                   '" />')
               s = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override, s, count=1)
           m.write_text(s)
+          print("manifest Application -> MultiDexApplication")
 
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
@@ -98,24 +108,14 @@ jobs:
               s += "\nandroid.useAndroidX=true\n"
           s += "android.suppressUnsupportedCompileSdk=34\n"
           gp.write_text(s)
-
-          # ===== multidex: 用 main-dex-list 格式，每行一个具体类名，不用通配符 =====
-          keep_file = pathlib.Path("mobile/multidex-keep.txt")
-          keep_file.write_text(
-              "com.shilapi.xcertplay.DiPlayApplication\n"
-              "androidx.multidex.MultiDexApplication\n"
-              "androidx.multidex.MultiDex\n"
-              "androidx.multidex.MultiDexExtractor\n"
-          )
-          mk = pathlib.Path("mobile/build.gradle.kts")
-          s = mk.read_text()
-          s = s.replace(
-              'multiDexKeepProguard = file("multidex-config.pro")',
-              'multiDexKeepFile = file("multidex-keep.txt")'
-          )
-          mk.write_text(s)
-          print("multidex-keep.txt created with explicit class names only")
           PYEOF
+
+      - name: Verify manifest
+        run: |
+          echo "===== Application 类 ====="
+          grep -n "android:name" mobile/src/main/AndroidManifest.xml | head -5
+          echo "===== multidex-keep 是否还存在引用 ====="
+          grep -rn "multiDexKeep" --include="build.gradle*" . | grep -v "/build/" | grep -v "/.gradle/" || echo "无 multiDexKeep 引用"
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
