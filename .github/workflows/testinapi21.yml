@@ -73,19 +73,29 @@ jobs:
           s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
 
-          # manifest 全面清理
+          # 删掉所有模块 manifest 里的 provider 声明
+          for p in glob.glob("**/AndroidManifest.xml", recursive=True):
+              if "/build/" in p or "/.gradle/" in p:
+                  continue
+              f = pathlib.Path(p)
+              s = f.read_text()
+              orig = s
+              # 删掉整段 provider
+              s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*/>', '', s)
+              s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*>.*?</provider>', '', s, flags=re.S)
+              # 删掉 Application 的 android:name
+              s = s.replace('android:name="com.shilapi.xcertplay.DiPlayApplication"', '')
+              s = s.replace('android:name="androidx.multidex.MultiDexApplication"', '')
+              if s != orig:
+                  f.write_text(s)
+                  print(f"Patched manifest: {p}")
+
+          # 用 tools:node="remove" 强制移除（不管在哪个模块声明）
           m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           s = m.read_text()
           s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
           s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
           s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
-          s = s.replace('android:name="com.shilapi.xcertplay.DiPlayApplication"', '')
-          s = s.replace('android:name="androidx.multidex.MultiDexApplication"', '')
-
-          # ★ 关键：删掉整个 ApkUpdateProvider 的 <provider> 块
-          s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*/>', '', s)
-          s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*>.*?</provider>', '', s, flags=re.S)
-
           if "tools:overrideLibrary" not in s:
               override = ('<uses-sdk tools:overrideLibrary="'
                   'androidx.media3.ui,androidx.media3.exoplayer,'
@@ -98,8 +108,16 @@ jobs:
                   'androidx.multidex,androidx.recyclerview,androidx.fragment'
                   '" />')
               s = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override, s, count=1)
+          # 在 <application ...> 后插入 remove 声明
+          if 'tools:node="remove"' not in s:
+              s = re.sub(
+                  r'(<application[^>]*>)',
+                  r'\1\n        <provider android:name="com.shilapi.xcertplay.ApkUpdateProvider" tools:node="remove" />\n        <provider android:name="androidx.core.content.FileProvider" tools:node="remove" />',
+                  s,
+                  count=1
+              )
           m.write_text(s)
-          print("Patched: minSdk=21, Application removed, ApkUpdateProvider removed")
+          print("Patched mobile manifest with tools:node=remove")
 
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
@@ -111,10 +129,22 @@ jobs:
           gp.write_text(s)
           PYEOF
 
-      - name: Show patched manifest
+      - name: Show all manifests and patches
         run: |
-          echo "===== manifest 内容 ====="
+          echo "========== 所有 AndroidManifest.xml 文件 =========="
+          find . -name "AndroidManifest.xml" -not -path "*/build/*" -not -path "*/.gradle/*"
+          echo ""
+          echo "========== mobile manifest 内容 =========="
           cat mobile/src/main/AndroidManifest.xml
+          echo ""
+          echo "========== common manifest 内容 =========="
+          cat common/src/main/AndroidManifest.xml 2>/dev/null || echo "(无)"
+          echo ""
+          echo "========== shared manifest 内容 =========="
+          cat shared/src/main/AndroidManifest.xml 2>/dev/null || echo "(无)"
+          echo ""
+          echo "========== 检查 provider 是否还被声明 =========="
+          grep -rn "ApkUpdateProvider" --include="AndroidManifest.xml" . | grep -v "/build/" || echo "无 provider 声明"
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
@@ -122,14 +152,20 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew :mobile:assembleDebug --stacktrace
 
-      - name: 检查 APK 内 dex 文件
+      - name: 检查 APK 内的 dex 文件
         run: |
           APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
           echo "APK: $APK"
-          echo "===== APK 内 dex 文件 ====="
-          unzip -l "$APK" | grep -E "\.dex" || true
-          echo "===== APK 内 assets 里的二级 dex ====="
+          echo ""
+          echo "========== APK 内所有 dex 文件 =========="
+          unzip -l "$APK" | grep -E "\.dex" || echo "无 dex 文件"
+          echo ""
+          echo "========== APK 内 assets 里的 secondary dex =========="
           unzip -l "$APK" | grep -i "secondary" || echo "无 secondary dex"
+          echo ""
+          echo "========== 检查 ApkUpdateProvider 是否在 APK 里 =========="
+          unzip -p "$APK" classes.dex 2>/dev/null | strings | grep -i "ApkUpdateProvider" | head -3 || echo "不在 classes.dex"
+          unzip -p "$APK" classes2.dex 2>/dev/null | strings | grep -i "ApkUpdateProvider" | head -3 || echo "不在 classes2.dex"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -159,10 +195,8 @@ jobs:
             adb logcat -d > logcat-full.txt
             echo "===== FATAL EXCEPTION ====="
             grep -A 100 "FATAL EXCEPTION" logcat-full.txt || echo "没有崩溃"
-            echo "===== AndroidRuntime ====="
-            grep -A 50 "AndroidRuntime" logcat-full.txt | head -120 || echo "无 AndroidRuntime"
-            echo "===== 最后 150 行 ====="
-            tail -150 logcat-full.txt
+            echo "===== 最后 100 行 ====="
+            tail -100 logcat-full.txt
 
       - name: Upload logs
         if: always()
