@@ -1,0 +1,16 @@
+- name: Run on Android 5.0 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 21
+          target: default
+          arch: x86
+          force-avd-creation: true
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          script: |
+            adb install -r mobile/build/outputs/apk/debug/*.apk || true
+            adb logcat -c
+            adb shell monkey -p com.shihab.diplay.hudtest -c android.intent.category.LAUNCHER 1 || true
+            sleep 30
+            adb logcat -d > logcat-full.txt
+            echo "===== FATAL EXCEPTION ====="
+            grep -A 60 "FATAL EXCEPTION" logcat-full.txt || echo "no crash"
