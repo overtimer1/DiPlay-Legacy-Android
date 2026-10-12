@@ -24,9 +24,9 @@ jobs:
         run: |
           SDKMGR=$(find $ANDROID_SDK_ROOT -name sdkmanager -type f 2>/dev/null | head -n 1)
           yes | $SDKMGR --licenses > /dev/null 2>&1 || true
-          $SDKMGR "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          $SDKMGR "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Patch project for AGP 7.4
+      - name: Patch project for AGP 7.4 + minSdk 17
         run: |
           python3 - <<'PYEOF'
           import re, pathlib, glob
@@ -50,23 +50,35 @@ jobs:
               "lifecycleRuntimeKtx": "2.5.1",
               "appcompat": "1.5.1",
               "desugarJdkLibs": "2.0.4",
-              "media3": "1.2.1",
           }.items():
               s = re.sub(rf'^{key} = ".*"', f'{key} = "{val}"', s, flags=re.M)
           l.write_text(s)
-          print("patched libs.versions.toml (media3 -> 1.2.1)")
+          print("patched libs.versions.toml")
 
-          # 3. 全局扫描所有 build.gradle*
+          # 3. 全局扫描：compileSdk=34, targetSdk=34, minSdk=17
           for p in glob.glob("**/build.gradle*", recursive=True):
               if "/build/" in p or "/.gradle/" in p or p.startswith("build/"):
                   continue
               f = pathlib.Path(p)
               s = f.read_text()
               original = s
-              s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 33', s)
-              s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 33', s)
-              s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 33', s)
+
+              # compileSdk -> 34
+              s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 34', s)
+              s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 34', s)
+
+              # targetSdk -> 34
+              s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 34', s)
+
+              # minSdk -> 17  ★ 关键
+              s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 17', s)
+              s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 17', s)
+              s = re.sub(r'\bminSdkVersion\s*=\s*\d+', 'minSdkVersion = 17', s)
+
+              # 删 optimization 块
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
+
+              # 删 L8DexDesugarLibTask import 和 afterEvaluate 块
               s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
               s = re.sub(
                   r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n',
@@ -74,12 +86,15 @@ jobs:
                   s,
                   flags=re.S
               )
+
+              # assets.directories -> assets.srcDirs
               s = s.replace("source.assets.directories", "source.assets.srcDirs")
+
               if s != original:
                   f.write_text(s)
                   print(f"patched {p}")
 
-          # 4. settings.gradle.kts: 删除 foojay 插件
+          # 4. settings.gradle.kts
           st = pathlib.Path("settings.gradle.kts")
           s = st.read_text()
           s = re.sub(
@@ -90,7 +105,7 @@ jobs:
           st.write_text(s)
           print("patched settings.gradle.kts")
 
-          # 5. manifest: 删除 API 24+/31+/33+ 字段
+          # 5. manifest
           m2 = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           if m2.exists():
               s = m2.read_text()
@@ -100,24 +115,29 @@ jobs:
               m2.write_text(s)
               print("patched AndroidManifest.xml")
 
-          # 6. gradle.properties: 只开 useAndroidX，不开 Jetifier
+          # 6. gradle.properties
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
           s = re.sub(r'^android\.enableJetifier=.*\n', '', s, flags=re.M)
+          s = re.sub(r'^android\.suppressUnsupportedCompileSdk=.*\n', '', s, flags=re.M)
           if "android.useAndroidX" not in s:
               s += "\nandroid.useAndroidX=true\n"
+          s += "android.suppressUnsupportedCompileSdk=34\n"
           gp.write_text(s)
           print("patched gradle.properties")
           PYEOF
 
       - name: Verify patches
         run: |
-          echo "===== gradle-wrapper ====="
-          grep distributionUrl gradle/wrapper/gradle-wrapper.properties
-          echo "===== libs.versions ====="
-          grep -E "^(agp|kotlin|media3|coreKtx|activity|lifecycleRuntimeKtx|appcompat|desugarJdkLibs) " gradle/libs.versions.toml
+          echo "===== minSdk / targetSdk / compileSdk ====="
+          for f in $(find . -name "build.gradle*" -not -path "*/build/*" -not -path "*/.gradle/*"); do
+            if grep -qE "minSdk|compileSdk|targetSdk" "$f" 2>/dev/null; then
+              echo "--- $f ---"
+              grep -nE "minSdk|compileSdk|targetSdk" "$f"
+            fi
+          done
           echo "===== gradle.properties ====="
-          grep -E "android.useAndroidX|android.enableJetifier" gradle.properties || true
+          grep -E "android.useAndroidX|android.suppressUnsupportedCompileSdk" gradle.properties || true
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
