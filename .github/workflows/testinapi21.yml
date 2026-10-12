@@ -99,12 +99,10 @@ jobs:
           s += "android.suppressUnsupportedCompileSdk=34\n"
           gp.write_text(s)
 
-          # ===== 关键修复：改用 multiDexKeepFile 把 DiPlayApplication 强制放进主 dex =====
+          # ===== multidex: 用 main-dex-list 格式，每行一个具体类名，不用通配符 =====
           keep_file = pathlib.Path("mobile/multidex-keep.txt")
           keep_file.write_text(
               "com.shilapi.xcertplay.DiPlayApplication\n"
-              "com.shilapi.xcertplay.DiPlayApplication$*\n"
-              "kotlin.jvm.internal.DefaultConstructorMarker\n"
               "androidx.multidex.MultiDexApplication\n"
               "androidx.multidex.MultiDex\n"
               "androidx.multidex.MultiDexExtractor\n"
@@ -116,7 +114,7 @@ jobs:
               'multiDexKeepFile = file("multidex-keep.txt")'
           )
           mk.write_text(s)
-          print("Patched: multidex keep file")
+          print("multidex-keep.txt created with explicit class names only")
           PYEOF
 
       - name: Grant execute permission
