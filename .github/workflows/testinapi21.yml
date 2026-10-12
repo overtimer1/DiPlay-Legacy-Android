@@ -57,7 +57,6 @@ jobs:
               s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 34', s)
               s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 34', s)
               s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 34', s)
-              # ★ 关键：minSdk 改成 21，让 AGP 走 VM 原生 multidex
               s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 21', s)
               s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 21', s)
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
@@ -74,16 +73,15 @@ jobs:
           s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
 
-          # manifest: Application 改回 DiPlayApplication（API 21 上 dex 自动加载，不需要 keep 逻辑）
+          # manifest: 删掉 Application 的 android:name 属性，让系统用默认 Application
           m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           s = m.read_text()
           s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
           s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
           s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
-          s = s.replace(
-              'android:name="androidx.multidex.MultiDexApplication"',
-              'android:name="com.shilapi.xcertplay.DiPlayApplication"'
-          )
+          # 关键：删除 application 标签里的 android:name
+          s = s.replace('android:name="com.shilapi.xcertplay.DiPlayApplication"', '')
+          s = s.replace('android:name="androidx.multidex.MultiDexApplication"', '')
           if "tools:overrideLibrary" not in s:
               override = ('<uses-sdk tools:overrideLibrary="'
                   'androidx.media3.ui,androidx.media3.exoplayer,'
@@ -106,8 +104,18 @@ jobs:
               s += "\nandroid.useAndroidX=true\n"
           s += "android.suppressUnsupportedCompileSdk=34\n"
           gp.write_text(s)
-          print("Patched: minSdk -> 21, Application -> DiPlayApplication")
+          print("Patched: minSdk=21, Application name removed")
           PYEOF
+
+      - name: 检查 APK 里的 dex 和类
+        run: |
+          echo "===== APK 里的 dex 文件 ====="
+          APK=$(find mobile/build/outputs/apk/debug -name "*.apk" 2>/dev/null | head -n 1)
+          if [ -n "$APK" ]; then
+            unzip -l "$APK" | grep -E "classes.*\.dex" || true
+          fi
+          echo "===== manifest 里 application 标签 ====="
+          grep -A 10 "<application" mobile/src/main/AndroidManifest.xml | head -12
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
