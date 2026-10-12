@@ -38,7 +38,7 @@ jobs:
           s = re.sub(r'^distributionSha256Sum=.*\n', '', s, flags=re.M)
           w.write_text(s)
 
-          # 2. libs.versions.toml
+          # 2. libs.versions.toml（注意 bouncycastle 降到 1.77）
           l = pathlib.Path("gradle/libs.versions.toml")
           s = l.read_text()
           for key, val in {
@@ -49,6 +49,7 @@ jobs:
               "lifecycleRuntimeKtx": "2.5.1",
               "appcompat": "1.5.1",
               "desugarJdkLibs": "2.0.4",
+              "bouncycastle": "1.77",
           }.items():
               s = re.sub(rf'^{key} = ".*"', f'{key} = "{val}"', s, flags=re.M)
           l.write_text(s)
@@ -113,9 +114,11 @@ jobs:
 
       - name: Show patched versions
         run: |
-          echo "===== manifest ====="
-          head -30 mobile/src/main/AndroidManifest.xml
-          echo "===== build.gradle.kts minSdk ====="
+          echo "===== bouncycastle version ====="
+          grep -E "^bouncycastle" gradle/libs.versions.toml
+          echo "===== manifest head ====="
+          head -20 mobile/src/main/AndroidManifest.xml
+          echo "===== minSdk ====="
           grep -rnE "minSdk|compileSdk|targetSdk" --include="build.gradle*" . | grep -v "/build/" | grep -v "/.gradle/"
 
       - name: Grant execute permission
