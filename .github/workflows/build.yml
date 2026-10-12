@@ -50,10 +50,11 @@ jobs:
               "lifecycleRuntimeKtx": "2.5.1",
               "appcompat": "1.5.1",
               "desugarJdkLibs": "2.0.4",
+              "media3": "1.2.1",
           }.items():
               s = re.sub(rf'^{key} = ".*"', f'{key} = "{val}"', s, flags=re.M)
           l.write_text(s)
-          print("patched libs.versions.toml")
+          print("patched libs.versions.toml (media3 -> 1.2.1)")
 
           # 3. 全局扫描所有 build.gradle*
           for p in glob.glob("**/build.gradle*", recursive=True):
@@ -102,12 +103,11 @@ jobs:
           # 6. gradle.properties: 只开 useAndroidX，不开 Jetifier
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
-          # 删掉可能已有的 enableJetifier 行
           s = re.sub(r'^android\.enableJetifier=.*\n', '', s, flags=re.M)
           if "android.useAndroidX" not in s:
               s += "\nandroid.useAndroidX=true\n"
           gp.write_text(s)
-          print("patched gradle.properties (useAndroidX only, no Jetifier)")
+          print("patched gradle.properties")
           PYEOF
 
       - name: Verify patches
@@ -115,16 +115,7 @@ jobs:
           echo "===== gradle-wrapper ====="
           grep distributionUrl gradle/wrapper/gradle-wrapper.properties
           echo "===== libs.versions ====="
-          grep -E "^(agp|kotlin|coreKtx|activity|lifecycleRuntimeKtx|appcompat|desugarJdkLibs) " gradle/libs.versions.toml
-          echo "===== 所有 build.gradle* 的 compileSdk/targetSdk ====="
-          for f in $(find . -name "build.gradle*" -not -path "*/build/*" -not -path "*/.gradle/*"); do
-            if grep -q "compileSdk\|targetSdk" "$f" 2>/dev/null; then
-              echo "--- $f ---"
-              grep -n "compileSdk\|targetSdk" "$f"
-            fi
-          done
-          echo "===== mobile manifest 残留 ====="
-          grep -n "dataExtractionRules\|localeConfig\|resizeableActivity" mobile/src/main/AndroidManifest.xml || echo "OK"
+          grep -E "^(agp|kotlin|media3|coreKtx|activity|lifecycleRuntimeKtx|appcompat|desugarJdkLibs) " gradle/libs.versions.toml
           echo "===== gradle.properties ====="
           grep -E "android.useAndroidX|android.enableJetifier" gradle.properties || true
 
