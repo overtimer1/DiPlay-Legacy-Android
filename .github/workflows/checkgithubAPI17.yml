@@ -1,0 +1,41 @@
+name: Check API 17 Emulator Availability
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use preinstalled Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
+
+      - name: Check sdkmanager path
+        run: |
+          which sdkmanager || true
+          ls $ANDROID_SDK_ROOT/cmdline-tools/ || true
+          find $ANDROID_SDK_ROOT -name "sdkmanager" -type f 2>/dev/null
+
+      - name: List available API 17 system images
+        run: |
+          SDKMGR=$(find $ANDROID_SDK_ROOT -name sdkmanager -type f 2>/dev/null | head -n 1)
+          echo "sdkmanager: $SDKMGR"
+          yes | $SDKMGR --licenses > /dev/null 2>&1 || true
+          echo "===== 搜索 API 17 相关镜像 ====="
+          $SDKMGR --list 2>/dev/null | grep -i "android-17" || echo "没有找到 android-17 相关包"
+
+      - name: Try install API 17 emulator
+        run: |
+          SDKMGR=$(find $ANDROID_SDK_ROOT -name sdkmanager -type f 2>/dev/null | head -n 1)
+          echo "===== 尝试安装 system-images;android-17;default;x86 ====="
+          $SDKMGR "system-images;android-17;default;x86" 2>&1 | tail -20 || echo "安装失败"
+          echo "===== 尝试安装 system-images;android-17;google_apis;x86 ====="
+          $SDKMGR "system-images;android-17;google_apis;x86" 2>&1 | tail -20 || echo "安装失败"
+          echo "===== 检查实际下载了什么 ====="
+          ls -la $ANDROID_SDK_ROOT/system-images/ 2>/dev/null || echo "system-images 目录不存在"
+          ls -la $ANDROID_SDK_ROOT/system-images/android-17/ 2>/dev/null || echo "android-17 目录不存在"
