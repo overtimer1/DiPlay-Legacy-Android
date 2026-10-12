@@ -159,6 +159,31 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew :mobile:assembleDebug --stacktrace
 
+      - name: 诊断 - APK 元信息和 dex 列表
+        run: |
+          APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          echo "APK: $APK"
+          echo ""
+          echo "========== APK 的 sdkVersion 声明（关键！）=========="
+          BT=$(find $ANDROID_SDK_ROOT/build-tools -name aapt2 -type f | sort | tail -n 1)
+          echo "aapt2: $BT"
+          $BT dump badging "$APK" 2>&1 | grep -iE "sdkVersion|targetSdkVersion" || echo "aapt2 dump 失败"
+          echo ""
+          echo "========== APK 的 minSdkVersion（从 manifest 直接读）=========="
+          $BT dump xmltree --file AndroidManifest.xml "$APK" 2>&1 | grep -A 2 "uses-sdk" | head -20 || true
+          echo ""
+          echo "========== APK 里的 dex 文件 =========="
+          unzip -l "$APK" | grep -E "classes.*\.dex" || echo "无 dex"
+          echo ""
+          echo "========== APK 里是否含 assets/secondary-program-dex-jars =========="
+          unzip -l "$APK" | grep -i "secondary-program" || echo "无 secondary-program-dex-jars（说明用了原生 multidex 模式）"
+          echo ""
+          echo "========== DiPlayActivity 类在哪个 dex 里 =========="
+          for dex in $(unzip -l "$APK" | grep -oE "classes[0-9]*\.dex"); do
+            echo "--- $dex ---"
+            unzip -p "$APK" "$dex" 2>/dev/null | strings | grep -c "DiPlayActivity" || echo "0"
+          done
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
