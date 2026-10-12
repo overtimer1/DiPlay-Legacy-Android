@@ -26,7 +26,7 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      - name: Patch for minSdk 17
+      - name: Patch project
         run: |
           python3 - <<'PYEOF'
           import re, pathlib, glob
@@ -57,13 +57,13 @@ jobs:
               s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 34', s)
               s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 34', s)
               s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 34', s)
-              s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 17', s)
-              s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 17', s)
+              # ★ 关键：minSdk 改成 21，让 AGP 走 VM 原生 multidex
+              s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 21', s)
+              s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 21', s)
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
               s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
               s = re.sub(r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n', '', s, flags=re.S)
               s = s.replace("source.assets.directories", "source.assets.srcDirs")
-              # 删掉所有 multiDexKeep 相关配置
               s = re.sub(r'\s*multiDexKeepProguard\s*=\s*file\([^)]*\)', '', s)
               s = re.sub(r'\s*multiDexKeepFile\s*=\s*file\([^)]*\)', '', s)
               if s != orig:
@@ -74,16 +74,15 @@ jobs:
           s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
 
-          # manifest: 删新字段 + overrideLibrary + Application 改成 MultiDexApplication
+          # manifest: Application 改回 DiPlayApplication（API 21 上 dex 自动加载，不需要 keep 逻辑）
           m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           s = m.read_text()
           s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
           s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
           s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
-          # 关键：Application 换成标准 MultiDexApplication
           s = s.replace(
-              'android:name="com.shilapi.xcertplay.DiPlayApplication"',
-              'android:name="androidx.multidex.MultiDexApplication"'
+              'android:name="androidx.multidex.MultiDexApplication"',
+              'android:name="com.shilapi.xcertplay.DiPlayApplication"'
           )
           if "tools:overrideLibrary" not in s:
               override = ('<uses-sdk tools:overrideLibrary="'
@@ -98,7 +97,6 @@ jobs:
                   '" />')
               s = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override, s, count=1)
           m.write_text(s)
-          print("manifest Application -> MultiDexApplication")
 
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
@@ -108,14 +106,8 @@ jobs:
               s += "\nandroid.useAndroidX=true\n"
           s += "android.suppressUnsupportedCompileSdk=34\n"
           gp.write_text(s)
+          print("Patched: minSdk -> 21, Application -> DiPlayApplication")
           PYEOF
-
-      - name: Verify manifest
-        run: |
-          echo "===== Application 类 ====="
-          grep -n "android:name" mobile/src/main/AndroidManifest.xml | head -5
-          echo "===== multidex-keep 是否还存在引用 ====="
-          grep -rn "multiDexKeep" --include="build.gradle*" . | grep -v "/build/" | grep -v "/.gradle/" || echo "无 multiDexKeep 引用"
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
@@ -126,7 +118,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DiPlay-minSdk17-debug
+          name: DiPlay-minSdk21-debug
           path: mobile/build/outputs/apk/debug/*.apk
 
       - name: Test on Android 5.0 emulator
