@@ -1,0 +1,242 @@
+name: Build for 4.2.2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Use preinstalled Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
+      - name: Install SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Patch build system
+        run: |
+          python3 - <<'PYEOF'
+          import re, pathlib, glob
+
+          w = pathlib.Path("gradle/wrapper/gradle-wrapper.properties")
+          s = w.read_text()
+          s = re.sub(r'gradle-[\d.]+-bin\.zip', 'gradle-7.6.4-bin.zip', s)
+          s = re.sub(r'^distributionSha256Sum=.*\n', '', s, flags=re.M)
+          w.write_text(s)
+
+          l = pathlib.Path("gradle/libs.versions.toml")
+          s = l.read_text()
+          for key, val in {
+              "agp": "7.4.2",
+              "kotlin": "1.9.24",
+              "coreKtx": "1.9.0",
+              "activity": "1.6.1",
+              "lifecycleRuntimeKtx": "2.5.1",
+              "appcompat": "1.5.1",
+              "desugarJdkLibs": "2.0.4",
+              "bouncycastle": "1.77",
+          }.items():
+              s = re.sub(rf'^{key} = ".*"', f'{key} = "{val}"', s, flags=re.M)
+          l.write_text(s)
+
+          for p in glob.glob("**/build.gradle*", recursive=True):
+              if "/build/" in p or "/.gradle/" in p or p.startswith("build/"):
+                  continue
+              f = pathlib.Path(p)
+              s = f.read_text()
+              orig = s
+              s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 34', s)
+              s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 34', s)
+              s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 34', s)
+              s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 17', s)
+              s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 17', s)
+              s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
+              s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
+              s = re.sub(r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n', '', s, flags=re.S)
+              s = s.replace("source.assets.directories", "source.assets.srcDirs")
+              if s != orig:
+                  f.write_text(s)
+
+          st = pathlib.Path("settings.gradle.kts")
+          s = st.read_text()
+          s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
+          st.write_text(s)
+
+          for p in glob.glob("**/AndroidManifest.xml", recursive=True):
+              if "/build/" in p or "/.gradle/" in p:
+                  continue
+              f = pathlib.Path(p)
+              s = f.read_text()
+              orig = s
+              s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
+              s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
+              s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
+              s = s.replace('android:foregroundServiceType="connectedDevice|microphone|location"', '')
+              if s != orig:
+                  f.write_text(s)
+
+          m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
+          s = m.read_text()
+          if "tools:overrideLibrary" not in s:
+              override = ('<uses-sdk tools:overrideLibrary="'
+                  'androidx.media3.ui,androidx.media3.exoplayer,'
+                  'androidx.media3.exoplayer.hls,androidx.media3.common,'
+                  'androidx.media3.extractor,androidx.media3.container,'
+                  'androidx.media3.datasource,androidx.media3.decoder,'
+                  'androidx.media3.database,androidx.media,'
+                  'androidx.core,androidx.appcompat,androidx.activity,'
+                  'androidx.lifecycle.runtime,androidx.annotation,'
+                  'androidx.multidex,androidx.recyclerview,androidx.fragment'
+                  '" />')
+              s = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override, s, count=1)
+          m.write_text(s)
+
+          gp = pathlib.Path("gradle.properties")
+          s = gp.read_text() if gp.exists() else ""
+          s = re.sub(r'^android\.enableJetifier=.*\n', '', s, flags=re.M)
+          s = re.sub(r'^android\.suppressUnsupportedCompileSdk=.*\n', '', s, flags=re.M)
+          if "android.useAndroidX" not in s:
+              s += "\nandroid.useAndroidX=true\n"
+          s += "android.suppressUnsupportedCompileSdk=34\n"
+          gp.write_text(s)
+
+          keep = pathlib.Path("mobile/multidex-keep.txt")
+          keep.write_text(
+              "com/shilapi/xcertplay/DiPlayApplication.class\n"
+              "androidx/multidex/MultiDexApplication.class\n"
+              "androidx/multidex/MultiDex.class\n"
+              "androidx/multidex/MultiDexExtractor.class\n"
+              "androidx/multidex/ZipUtil.class\n"
+          )
+          mk = pathlib.Path("mobile/build.gradle.kts")
+          s = mk.read_text()
+          if "multiDexKeepProguard" in s:
+              s = re.sub(
+                  r'multiDexKeepProguard\s*=\s*file\("multidex-config\.pro"\)',
+                  'multiDexKeepFile = file("multidex-keep.txt")',
+                  s
+              )
+          elif "multiDexKeepFile" not in s:
+              s = re.sub(
+                  r'(multiDexEnabled\s*=\s*true)',
+                  r'\1\n        multiDexKeepFile = file("multidex-keep.txt")',
+                  s
+              )
+          mk.write_text(s)
+          print("Build system patched.")
+          PYEOF
+
+      - name: Patch source code for API 17
+        run: |
+          python3 - <<'PYEOF'
+          import re, pathlib
+
+          usb = pathlib.Path("shared/src/main/java/com/shilapi/xcertplay/transport/UsbApiCompat.kt")
+          if usb.exists():
+              s = usb.read_text()
+              if "bulkTransferCompat" not in s:
+                  func_lines = [
+                      "internal fun bulkTransferCompat(",
+                      "    connection: UsbDeviceConnection,",
+                      "    endpoint: UsbEndpoint,",
+                      "    buffer: ByteArray,",
+                      "    offset: Int,",
+                      "    count: Int,",
+                      "    timeoutMillis: Int,",
+                      "): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {",
+                      "    connection.bulkTransfer(endpoint, buffer, offset, count, timeoutMillis)",
+                      "} else {",
+                      "    @Suppress(\"DEPRECATION\")",
+                      "    connection.bulkTransfer(endpoint, buffer.copyOfRange(offset, offset + count), count, timeoutMillis)",
+                      "}",
+                      "",
+                      "",
+                  ]
+                  func = "\n".join(func_lines)
+                  s = s.replace(
+                      "internal fun writeUsbChunks(",
+                      func + "internal fun writeUsbChunks("
+                  )
+                  usb.write_text(s)
+                  print("patched UsbApiCompat.kt")
+
+          iphone = pathlib.Path("shared/src/main/java/com/shilapi/xcertplay/transport/IphoneUsbHost.kt")
+          if iphone.exists():
+              s = iphone.read_text()
+              old = "connection.bulkTransfer(outEndpoint, data, offset, count, timeout)"
+              new = "bulkTransferCompat(connection, outEndpoint, data, offset, count, timeout)"
+              if old in s:
+                  s = s.replace(old, new)
+                  iphone.write_text(s)
+                  print("patched IphoneUsbHost.kt")
+
+          crypto = pathlib.Path("shared/src/main/java/com/shilapi/xcertplay/airplay/AirPlayCrypto.kt")
+          if crypto.exists():
+              s = crypto.read_text()
+              marker = "if (Build.VERSION.SDK_INT < 19) return null"
+              if marker not in s:
+                  old = "        val state = platformState.get() ?: return null"
+                  new = ("        // API < 19: updateAAD unavailable, fall back to BouncyCastle\n"
+                         "        if (Build.VERSION.SDK_INT < 19) return null\n"
+                         "        val state = platformState.get() ?: return null")
+                  if old in s:
+                      s = s.replace(old, new, 1)
+                      if "import android.os.Build" not in s:
+                          s = s.replace("import java.nio.ByteBuffer", "import android.os.Build\nimport java.nio.ByteBuffer")
+                      crypto.write_text(s)
+                      print("patched AirPlayCrypto.kt")
+
+          print("Source code patched.")
+          PYEOF
+
+      - name: Show patches
+        run: |
+          echo "===== minSdk ====="
+          grep -rnE "minSdk|compileSdk|targetSdk" --include="build.gradle*" . | grep -v "/build/" | grep -v "/.gradle/"
+          echo ""
+          echo "===== bulkTransferCompat 出现次数 ====="
+          grep -c "bulkTransferCompat" shared/src/main/java/com/shilapi/xcertplay/transport/UsbApiCompat.kt || true
+          grep -c "bulkTransferCompat" shared/src/main/java/com/shilapi/xcertplay/transport/IphoneUsbHost.kt || true
+          echo ""
+          echo "===== AirPlayCrypto SDK_INT<19 判断 ====="
+          grep -c "Build.VERSION.SDK_INT < 19" shared/src/main/java/com/shilapi/xcertplay/airplay/AirPlayCrypto.kt || true
+
+      - name: Grant execute permission
+        run: chmod +x ./gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew :mobile:assembleDebug --stacktrace
+
+      - name: Verify APK
+        run: |
+          APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          echo "APK: $APK"
+          BT=$(find $ANDROID_SDK_ROOT/build-tools -name aapt2 -type f | sort | tail -n 1)
+          echo "===== sdkVersion ====="
+          $BT dump badging "$APK" 2>&1 | grep -iE "sdkVersion"
+          echo "===== dex 文件 ====="
+          unzip -l "$APK" | grep -E "classes.*\.dex"
+          echo "===== secondary-program-dex-jars ====="
+          unzip -l "$APK" | grep -i "secondary-program" || echo "无"
+          echo "===== 签名 ====="
+          BT2=$(find $ANDROID_SDK_ROOT/build-tools -name apksigner -type f | sort | tail -n 1)
+          $BT2 verify --verbose "$APK" 2>&1 | grep -iE "v1|v2|v3|verified" | head -10
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiPlay-API17-v1
+          path: mobile/build/outputs/apk/debug/*.apk
