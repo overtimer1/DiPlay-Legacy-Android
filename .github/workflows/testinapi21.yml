@@ -73,24 +73,23 @@ jobs:
           s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
 
-          # 删掉所有模块 manifest 里的 provider 声明
+          # 全局清理所有 manifest
           for p in glob.glob("**/AndroidManifest.xml", recursive=True):
               if "/build/" in p or "/.gradle/" in p:
                   continue
               f = pathlib.Path(p)
               s = f.read_text()
               orig = s
-              # 删掉整段 provider
               s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*/>', '', s)
               s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*>.*?</provider>', '', s, flags=re.S)
-              # 删掉 Application 的 android:name
+              s = re.sub(r'<provider\s+[^>]*DiagnosticReportProvider[^>]*>.*?</provider>', '', s, flags=re.S)
+              s = re.sub(r'<provider\s+[^>]*DiagnosticReportProvider[^>]*/>', '', s)
               s = s.replace('android:name="com.shilapi.xcertplay.DiPlayApplication"', '')
               s = s.replace('android:name="androidx.multidex.MultiDexApplication"', '')
               if s != orig:
                   f.write_text(s)
-                  print(f"Patched manifest: {p}")
 
-          # 用 tools:node="remove" 强制移除（不管在哪个模块声明）
+          # mobile manifest: 加 remove 声明 + overrideLibrary
           m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           s = m.read_text()
           s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
@@ -108,16 +107,45 @@ jobs:
                   'androidx.multidex,androidx.recyclerview,androidx.fragment'
                   '" />')
               s = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override, s, count=1)
-          # 在 <application ...> 后插入 remove 声明
           if 'tools:node="remove"' not in s:
               s = re.sub(
                   r'(<application[^>]*>)',
-                  r'\1\n        <provider android:name="com.shilapi.xcertplay.ApkUpdateProvider" tools:node="remove" />\n        <provider android:name="androidx.core.content.FileProvider" tools:node="remove" />',
+                  r'\1\n        <provider android:name="com.shilapi.xcertplay.ApkUpdateProvider" tools:node="remove" />\n        <provider android:name="com.shilapi.xcertplay.DiagnosticReportProvider" tools:node="remove" />',
                   s,
                   count=1
               )
           m.write_text(s)
-          print("Patched mobile manifest with tools:node=remove")
+
+          # 关键：multiDexKeepFile，用斜杠格式
+          keep_file = pathlib.Path("mobile/multidex-keep.txt")
+          keep_file.write_text(
+              "com/shilapi/xcertplay/DiPlayApplication.class\n"
+              "com/shilapi/xcertplay/DiPlayActivity.class\n"
+              "com/shilapi/xcertplay/MainActivity.class\n"
+              "com/shilapi/xcertplay/CarPlayHostActivity.class\n"
+              "com/shilapi/xcertplay/CarPlayVideoActivity.class\n"
+              "com/shilapi/xcertplay/ImageCropActivity.class\n"
+              "com/shilapi/xcertplay/AdbClusterActivity.class\n"
+              "com/shilapi/xcertplay/DiPlaySessionService.class\n"
+              "com/shilapi/xcertplay/BootReceiver.class\n"
+              "com/shilapi/xcertplay/NavigationWidget.class\n"
+              "com/shilapi/xcertplay/MapEmbedService.class\n"
+              "com/shilapi/xcertplay/WheelKeyService.class\n"
+              "com/shilapi/xcertplay/UsbAutoConfirmService.class\n"
+              "androidx/multidex/MultiDexApplication.class\n"
+              "androidx/multidex/MultiDex.class\n"
+          )
+
+          mk = pathlib.Path("mobile/build.gradle.kts")
+          s = mk.read_text()
+          if 'multiDexKeepFile' not in s:
+              s = re.sub(
+                  r'(multiDexEnabled\s*=\s*true)',
+                  r'\1\n        multiDexKeepFile = file("multidex-keep.txt")',
+                  s
+              )
+          mk.write_text(s)
+          print("Patched: multidex-keep.txt with slash format")
 
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
@@ -129,22 +157,13 @@ jobs:
           gp.write_text(s)
           PYEOF
 
-      - name: Show all manifests and patches
+      - name: Show patches
         run: |
-          echo "========== 所有 AndroidManifest.xml 文件 =========="
-          find . -name "AndroidManifest.xml" -not -path "*/build/*" -not -path "*/.gradle/*"
+          echo "===== multidex-keep.txt ====="
+          cat mobile/multidex-keep.txt
           echo ""
-          echo "========== mobile manifest 内容 =========="
-          cat mobile/src/main/AndroidManifest.xml
-          echo ""
-          echo "========== common manifest 内容 =========="
-          cat common/src/main/AndroidManifest.xml 2>/dev/null || echo "(无)"
-          echo ""
-          echo "========== shared manifest 内容 =========="
-          cat shared/src/main/AndroidManifest.xml 2>/dev/null || echo "(无)"
-          echo ""
-          echo "========== 检查 provider 是否还被声明 =========="
-          grep -rn "ApkUpdateProvider" --include="AndroidManifest.xml" . | grep -v "/build/" || echo "无 provider 声明"
+          echo "===== mobile build.gradle.kts 里的 multiDex 配置 ====="
+          grep -n "multiDex" mobile/build.gradle.kts || true
 
       - name: Grant execute permission
         run: chmod +x ./gradlew
@@ -152,20 +171,10 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew :mobile:assembleDebug --stacktrace
 
-      - name: 检查 APK 内的 dex 文件
+      - name: 检查 APK 内 dex 文件
         run: |
           APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          echo "APK: $APK"
-          echo ""
-          echo "========== APK 内所有 dex 文件 =========="
-          unzip -l "$APK" | grep -E "\.dex" || echo "无 dex 文件"
-          echo ""
-          echo "========== APK 内 assets 里的 secondary dex =========="
-          unzip -l "$APK" | grep -i "secondary" || echo "无 secondary dex"
-          echo ""
-          echo "========== 检查 ApkUpdateProvider 是否在 APK 里 =========="
-          unzip -p "$APK" classes.dex 2>/dev/null | strings | grep -i "ApkUpdateProvider" | head -3 || echo "不在 classes.dex"
-          unzip -p "$APK" classes2.dex 2>/dev/null | strings | grep -i "ApkUpdateProvider" | head -3 || echo "不在 classes2.dex"
+          unzip -l "$APK" | grep -E "\.dex" || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -183,13 +192,8 @@ jobs:
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           disable-animations: true
           script: |
-            echo "===== 设备信息 ====="
-            adb shell getprop ro.build.version.release
-            adb shell getprop ro.build.version.sdk
-            echo "===== 安装 APK ====="
             adb install -r mobile/build/outputs/apk/debug/*.apk || true
             adb logcat -c
-            echo "===== 启动 App ====="
             adb shell monkey -p com.shihab.diplay.hudtest -c android.intent.category.LAUNCHER 1 || true
             sleep 60
             adb logcat -d > logcat-full.txt
