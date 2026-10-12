@@ -1,4 +1,4 @@
-name: Build and Test on Android 5.1
+name: Build for Android 4.2.2 (API 17)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -20,34 +21,44 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
 
       - name: Install SDK components
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "emulator" "system-images;android-17;default;x86"
 
-      - name: Patch project
+      - name: Patch project for API 17
         run: |
           python3 - <<'PYEOF'
           import re, pathlib, glob
 
+          # 1. Gradle wrapper: 9.5 -> 7.6.4
           w = pathlib.Path("gradle/wrapper/gradle-wrapper.properties")
           s = w.read_text()
           s = re.sub(r'gradle-[\d.]+-bin\.zip', 'gradle-7.6.4-bin.zip', s)
           s = re.sub(r'^distributionSha256Sum=.*\n', '', s, flags=re.M)
           w.write_text(s)
+          print("patched gradle-wrapper.properties")
 
+          # 2. libs.versions.toml: AGP/Kotlin/依赖降级
           l = pathlib.Path("gradle/libs.versions.toml")
           s = l.read_text()
           for key, val in {
-              "agp": "7.4.2", "kotlin": "1.9.24", "coreKtx": "1.9.0",
-              "activity": "1.6.1", "lifecycleRuntimeKtx": "2.5.1",
-              "appcompat": "1.5.1", "desugarJdkLibs": "2.0.4",
+              "agp": "7.4.2",
+              "kotlin": "1.9.24",
+              "coreKtx": "1.9.0",
+              "activity": "1.6.1",
+              "lifecycleRuntimeKtx": "2.5.1",
+              "appcompat": "1.5.1",
+              "desugarJdkLibs": "2.0.4",
               "bouncycastle": "1.77",
           }.items():
               s = re.sub(rf'^{key} = ".*"', f'{key} = "{val}"', s, flags=re.M)
           l.write_text(s)
+          print("patched libs.versions.toml")
 
+          # 3. build.gradle*: compileSdk=34, targetSdk=34, minSdk=17, 删除新语法
           for p in glob.glob("**/build.gradle*", recursive=True):
               if "/build/" in p or "/.gradle/" in p or p.startswith("build/"):
                   continue
@@ -57,42 +68,41 @@ jobs:
               s = re.sub(r'compileSdk\s*\{\s*version\s*=\s*release\(\d+\)\s*\}', 'compileSdk = 34', s)
               s = re.sub(r'\bcompileSdk\s*=\s*\d+', 'compileSdk = 34', s)
               s = re.sub(r'\btargetSdk\s*=\s*\d+', 'targetSdk = 34', s)
-              s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 21', s)
-              s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 21', s)
+              s = re.sub(r'\bminSdk\s*=\s*\d+', 'minSdk = 17', s)
+              s = re.sub(r'\bminSdkVersion\s+\d+', 'minSdkVersion 17', s)
               s = re.sub(r'optimization\s*\{[^}]*\}', '', s)
               s = re.sub(r'^import com\.android\.build\.gradle\.internal\.tasks\.L8DexDesugarLibTask\s*$', '', s, flags=re.M)
               s = re.sub(r'afterEvaluate\s*\{[^{}]*?L8DexDesugarLibTask.*?\n\}\n', '', s, flags=re.S)
               s = s.replace("source.assets.directories", "source.assets.srcDirs")
-              s = re.sub(r'\s*multiDexKeepProguard\s*=\s*file\([^)]*\)', '', s)
-              s = re.sub(r'\s*multiDexKeepFile\s*=\s*file\([^)]*\)', '', s)
               if s != orig:
                   f.write_text(s)
+                  print(f"patched {p}")
 
+          # 4. settings.gradle.kts: 删除 foojay 插件
           st = pathlib.Path("settings.gradle.kts")
           s = st.read_text()
           s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
+          print("patched settings.gradle.kts")
 
+          # 5. manifest: 只删 API 24+/31+/33+ 字段，其他都保留
           for p in glob.glob("**/AndroidManifest.xml", recursive=True):
               if "/build/" in p or "/.gradle/" in p:
                   continue
               f = pathlib.Path(p)
               s = f.read_text()
               orig = s
-              s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*/>', '', s)
-              s = re.sub(r'<provider\s+[^>]*ApkUpdateProvider[^>]*>.*?</provider>', '', s, flags=re.S)
-              s = re.sub(r'<provider\s+[^>]*DiagnosticReportProvider[^>]*>.*?</provider>', '', s, flags=re.S)
-              s = re.sub(r'<provider\s+[^>]*DiagnosticReportProvider[^>]*/>', '', s)
-              s = s.replace('android:name="com.shilapi.xcertplay.DiPlayApplication"', '')
-              s = s.replace('android:name="androidx.multidex.MultiDexApplication"', '')
+              s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
+              s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
+              s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
+              s = s.replace('android:foregroundServiceType="connectedDevice|microphone|location"', '')
               if s != orig:
                   f.write_text(s)
+                  print(f"patched {p}")
 
+          # 6. mobile manifest: 加 tools:overrideLibrary（Media3 等库声明 minSdk 19 以上）
           m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           s = m.read_text()
-          s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
-          s = re.sub(r'\s*android:localeConfig="[^"]*"', '', s)
-          s = re.sub(r'\s*android:resizeableActivity="[^"]*"', '', s)
           if "tools:overrideLibrary" not in s:
               override = ('<uses-sdk tools:overrideLibrary="'
                   'androidx.media3.ui,androidx.media3.exoplayer,'
@@ -105,44 +115,10 @@ jobs:
                   'androidx.multidex,androidx.recyclerview,androidx.fragment'
                   '" />')
               s = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + override, s, count=1)
-          if 'tools:node="remove"' not in s:
-              s = re.sub(
-                  r'(<application[^>]*>)',
-                  r'\1\n        <provider android:name="com.shilapi.xcertplay.ApkUpdateProvider" tools:node="remove" />\n        <provider android:name="com.shilapi.xcertplay.DiagnosticReportProvider" tools:node="remove" />',
-                  s,
-                  count=1
-              )
           m.write_text(s)
+          print("patched mobile AndroidManifest.xml with overrideLibrary")
 
-          keep_file = pathlib.Path("mobile/multidex-keep.txt")
-          keep_file.write_text(
-              "com/shilapi/xcertplay/DiPlayApplication.class\n"
-              "com/shilapi/xcertplay/DiPlayActivity.class\n"
-              "com/shilapi/xcertplay/MainActivity.class\n"
-              "com/shilapi/xcertplay/CarPlayHostActivity.class\n"
-              "com/shilapi/xcertplay/CarPlayVideoActivity.class\n"
-              "com/shilapi/xcertplay/ImageCropActivity.class\n"
-              "com/shilapi/xcertplay/AdbClusterActivity.class\n"
-              "com/shilapi/xcertplay/DiPlaySessionService.class\n"
-              "com/shilapi/xcertplay/BootReceiver.class\n"
-              "com/shilapi/xcertplay/NavigationWidget.class\n"
-              "com/shilapi/xcertplay/MapEmbedService.class\n"
-              "com/shilapi/xcertplay/WheelKeyService.class\n"
-              "com/shilapi/xcertplay/UsbAutoConfirmService.class\n"
-              "androidx/multidex/MultiDexApplication.class\n"
-              "androidx/multidex/MultiDex.class\n"
-          )
-
-          mk = pathlib.Path("mobile/build.gradle.kts")
-          s = mk.read_text()
-          if 'multiDexKeepFile' not in s:
-              s = re.sub(
-                  r'(multiDexEnabled\s*=\s*true)',
-                  r'\1\n        multiDexKeepFile = file("multidex-keep.txt")',
-                  s
-              )
-          mk.write_text(s)
-
+          # 7. gradle.properties: useAndroidX + suppressUnsupportedCompileSdk
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
           s = re.sub(r'^android\.enableJetifier=.*\n', '', s, flags=re.M)
@@ -151,6 +127,7 @@ jobs:
               s += "\nandroid.useAndroidX=true\n"
           s += "android.suppressUnsupportedCompileSdk=34\n"
           gp.write_text(s)
+          print("patched gradle.properties")
           PYEOF
 
       - name: Grant execute permission
@@ -159,60 +136,79 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew :mobile:assembleDebug --stacktrace
 
-      - name: 诊断 - APK 元信息和 dex 列表
+      - name: 诊断 APK
         run: |
           APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
           echo "APK: $APK"
-          echo ""
-          echo "========== APK 的 sdkVersion 声明（关键！）=========="
           BT=$(find $ANDROID_SDK_ROOT/build-tools -name aapt2 -type f | sort | tail -n 1)
-          echo "aapt2: $BT"
-          $BT dump badging "$APK" 2>&1 | grep -iE "sdkVersion|targetSdkVersion" || echo "aapt2 dump 失败"
-          echo ""
-          echo "========== APK 的 minSdkVersion（从 manifest 直接读）=========="
-          $BT dump xmltree --file AndroidManifest.xml "$APK" 2>&1 | grep -A 2 "uses-sdk" | head -20 || true
-          echo ""
-          echo "========== APK 里的 dex 文件 =========="
-          unzip -l "$APK" | grep -E "classes.*\.dex" || echo "无 dex"
-          echo ""
-          echo "========== APK 里是否含 assets/secondary-program-dex-jars =========="
-          unzip -l "$APK" | grep -i "secondary-program" || echo "无 secondary-program-dex-jars（说明用了原生 multidex 模式）"
-          echo ""
-          echo "========== DiPlayActivity 类在哪个 dex 里 =========="
-          for dex in $(unzip -l "$APK" | grep -oE "classes[0-9]*\.dex"); do
-            echo "--- $dex ---"
-            unzip -p "$APK" "$dex" 2>/dev/null | strings | grep -c "DiPlayActivity" || echo "0"
+          echo "===== APK sdkVersion ====="
+          $BT dump badging "$APK" 2>&1 | grep -iE "sdkVersion" || true
+          echo "===== APK 里 dex 文件 ====="
+          unzip -l "$APK" | grep -E "classes.*\.dex" || true
+          echo "===== assets/secondary-program-dex-jars（老式 multidex 标志）====="
+          unzip -l "$APK" | grep -i "secondary-program" || echo "无"
+          echo "===== dexdump 定位 DiPlayActivity ====="
+          BT2=$(find $ANDROID_SDK_ROOT/build-tools -name dexdump -type f | sort | tail -n 1)
+          mkdir -p /tmp/apk_x && cd /tmp/apk_x
+          unzip -o "$GITHUB_WORKSPACE/$APK" "classes*.dex" > /dev/null
+          for dex in classes*.dex; do
+            n=$($BT2 -f "$dex" 2>/dev/null | grep -c "DiPlayActivity" || true)
+            echo "$dex: DiPlayActivity 引用数 = $n"
           done
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DiPlay-minSdk21-debug
+          name: DiPlay-API17-debug
           path: mobile/build/outputs/apk/debug/*.apk
 
-      - name: Test on Android 5.1 emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 22
-          target: default
-          arch: x86
-          force-avd-creation: true
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
-          disable-animations: true
-          script: |
-            adb install -r mobile/build/outputs/apk/debug/*.apk || true
-            adb logcat -c
-            adb shell monkey -p com.shihab.diplay.hudtest -c android.intent.category.LAUNCHER 1 || true
-            sleep 60
-            adb logcat -d > logcat-full.txt
-            echo "===== FATAL EXCEPTION ====="
-            grep -A 100 "FATAL EXCEPTION" logcat-full.txt || echo "没有崩溃"
-            echo "===== 最后 100 行 ====="
-            tail -100 logcat-full.txt
+      - name: Create AVD for API 17
+        run: |
+          echo "no" | avdmanager create avd -n test17 -k "system-images;android-17;default;x86" -d "Nexus S" --force
+          avdmanager list avd
+
+      - name: Start API 17 emulator (software emulation)
+        run: |
+          nohup emulator -avd test17 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel off > /tmp/emulator.log 2>&1 &
+          echo "Waiting for device (no timeout, will be killed by job timeout)..."
+          adb wait-for-device || true
+          echo "Device connected. Waiting for boot_completed..."
+          for i in $(seq 1 240); do
+            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r\n' || echo "")
+            if [ "$BOOT" = "1" ]; then
+              echo "Boot completed after $i checks"
+              break
+            fi
+            echo "check $i: boot_completed=$BOOT"
+            sleep 15
+          done
+          echo "===== 设备信息 ====="
+          adb shell getprop ro.build.version.release || true
+          adb shell getprop ro.build.version.sdk || true
+          adb devices
+          echo "===== emulator.log 末尾 ====="
+          tail -50 /tmp/emulator.log || true
+
+      - name: Install and launch on API 17
+        if: always()
+        run: |
+          APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          adb install -r "$APK" 2>&1 | tee /tmp/install.log || true
+          adb logcat -c || true
+          adb shell monkey -p com.shihab.diplay.hudtest -c android.intent.category.LAUNCHER 1 || true
+          sleep 60
+          adb logcat -d > /tmp/logcat-full.txt || true
+          echo "===== FATAL EXCEPTION ====="
+          grep -A 100 "FATAL EXCEPTION" /tmp/logcat-full.txt || echo "无崩溃"
+          echo "===== 最后 100 行 ====="
+          tail -100 /tmp/logcat-full.txt || true
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: emulator-logs
-          path: logcat-full.txt
+          path: |
+            /tmp/logcat-full.txt
+            /tmp/emulator.log
+            /tmp/install.log
