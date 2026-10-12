@@ -21,17 +21,17 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Use preinstalled Android SDK
+      - name: Set PATH
         run: |
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/emulator" >> $GITHUB_PATH
 
       - name: Install SDK components
         run: |
-          SDKMGR=$(find $ANDROID_SDK_ROOT -name sdkmanager -type f 2>/dev/null | head -n 1)
-          yes | $SDKMGR --licenses > /dev/null 2>&1 || true
-          $SDKMGR "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          $SDKMGR "emulator" "system-images;android-17;default;x86" || true
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "emulator" "system-images;android-17;default;x86"
 
       - name: Patch for minSdk 17
         run: |
@@ -123,42 +123,51 @@ jobs:
           name: DiPlay-minSdk17-debug
           path: mobile/build/outputs/apk/debug/*.apk
 
-      # ========== 以下是在 Android 4.2.2 模拟器上测试 ==========
-      - name: Create AVD (Android 4.2.2)
+      - name: Create AVD
         run: |
-          echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd \
-            -n test17 -k "system-images;android-17;default;x86" --force
+          echo "no" | avdmanager create avd -n test17 -k "system-images;android-17;default;x86" -d "Nexus S" --force
+          echo "===== AVD list ====="
+          avdmanager list avd
 
       - name: Start emulator
         run: |
-          $ANDROID_HOME/emulator/emulator -avd test17 -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
-          echo "Waiting for emulator to boot..."
+          nohup emulator -avd test17 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect > emulator.log 2>&1 &
+          echo "Waiting for device..."
           adb wait-for-device
-          # 等系统完全启动
-          timeout 300 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 5; done' || true
-          adb shell getprop ro.build.version.release
+          echo "Waiting for boot..."
+          timeout 600 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 5; done' || echo "boot timeout"
+          echo "===== device info ====="
+          adb shell getprop ro.build.version.release || true
+          adb shell getprop ro.build.version.sdk || true
+          adb devices
 
-      - name: Install APK on emulator
+      - name: Install APK
         run: |
           APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          echo "Installing $APK"
-          adb install -r "$APK" || echo "INSTALL_FAILED"
+          echo "Installing: $APK"
+          adb install -r "$APK" 2>&1 | tee install.log
 
-      - name: Launch app and capture logcat
+      - name: Launch and capture logcat
         run: |
           adb logcat -c
-          # 找主 Activity，尝试启动
-          adb shell monkey -p com.shihab.diplay.hudtest -c android.intent.category.LAUNCHER 1 || true
-          sleep 20
+          echo "===== launching app ====="
+          adb shell monkey -p com.shihab.diplay.hudtest -c android.intent.category.LAUNCHER 1 2>&1 | tee launch.log
+          sleep 30
           adb logcat -d > logcat-full.txt
           echo "===== FATAL EXCEPTION ====="
-          grep -A 50 "FATAL EXCEPTION" logcat-full.txt || echo "没有崩溃"
+          grep -A 60 "FATAL EXCEPTION" logcat-full.txt || echo "没有 FATAL EXCEPTION"
           echo "===== AndroidRuntime ====="
-          grep -A 30 "AndroidRuntime" logcat-full.txt || echo "无 AndroidRuntime 错误"
+          grep -A 40 "AndroidRuntime" logcat-full.txt || echo "无 AndroidRuntime 错误"
+          echo "===== 最后 200 行 logcat ====="
+          tail -200 logcat-full.txt
 
-      - name: Upload logcat
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logcat-android17
-          path: logcat-full.txt
+          name: emulator-logs
+          path: |
+            logcat-full.txt
+            install.log
+            launch.log
+            emulator.log
