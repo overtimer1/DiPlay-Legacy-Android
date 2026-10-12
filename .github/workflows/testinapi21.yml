@@ -1,4 +1,4 @@
-name: Build and Test on Android 5.0
+name: Build and Test on Android 5.1
 
 on:
   workflow_dispatch:
@@ -73,7 +73,6 @@ jobs:
           s = re.sub(r'plugins\s*\{\s*id\("org\.gradle\.toolchains\.foojay-resolver-convention"\)[^}]*\}\s*', '', s)
           st.write_text(s)
 
-          # 全局清理所有 manifest
           for p in glob.glob("**/AndroidManifest.xml", recursive=True):
               if "/build/" in p or "/.gradle/" in p:
                   continue
@@ -89,7 +88,6 @@ jobs:
               if s != orig:
                   f.write_text(s)
 
-          # mobile manifest: 加 remove 声明 + overrideLibrary
           m = pathlib.Path("mobile/src/main/AndroidManifest.xml")
           s = m.read_text()
           s = re.sub(r'\s*android:dataExtractionRules="[^"]*"', '', s)
@@ -116,7 +114,6 @@ jobs:
               )
           m.write_text(s)
 
-          # 关键：multiDexKeepFile，用斜杠格式
           keep_file = pathlib.Path("mobile/multidex-keep.txt")
           keep_file.write_text(
               "com/shilapi/xcertplay/DiPlayApplication.class\n"
@@ -145,7 +142,6 @@ jobs:
                   s
               )
           mk.write_text(s)
-          print("Patched: multidex-keep.txt with slash format")
 
           gp = pathlib.Path("gradle.properties")
           s = gp.read_text() if gp.exists() else ""
@@ -157,24 +153,11 @@ jobs:
           gp.write_text(s)
           PYEOF
 
-      - name: Show patches
-        run: |
-          echo "===== multidex-keep.txt ====="
-          cat mobile/multidex-keep.txt
-          echo ""
-          echo "===== mobile build.gradle.kts 里的 multiDex 配置 ====="
-          grep -n "multiDex" mobile/build.gradle.kts || true
-
       - name: Grant execute permission
         run: chmod +x ./gradlew
 
       - name: Build Debug APK
         run: ./gradlew :mobile:assembleDebug --stacktrace
-
-      - name: 检查 APK 内 dex 文件
-        run: |
-          APK=$(find mobile/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          unzip -l "$APK" | grep -E "\.dex" || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -182,10 +165,10 @@ jobs:
           name: DiPlay-minSdk21-debug
           path: mobile/build/outputs/apk/debug/*.apk
 
-      - name: Test on Android 5.0 emulator
+      - name: Test on Android 5.1 emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 21
+          api-level: 22
           target: default
           arch: x86
           force-avd-creation: true
